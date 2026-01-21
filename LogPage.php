@@ -1,4 +1,7 @@
 <?php
+
+session_start();
+
 // Initialize variables
 $admin_id = $username = $full_name = $email = $password = $confirm_password = "";
 $adminErr = $userErr = $nameErr = $emailErr = $passErr = $confirmErr = "";
