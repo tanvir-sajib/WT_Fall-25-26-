@@ -1,23 +1,10 @@
 <?php
 // orders.php - Order & Fulfillment Management
 session_start();
+require_once 'config.php';
 
-// Initialize inventory if not exists
-if (!isset($_SESSION['inventory'])) {
-    $_SESSION['inventory'] = [
-        ['id' => 1, 'name' => 'Laptop', 'price' => 999.00, 'stock' => 50, 'discount' => 10, 'visibility' => 1],
-        ['id' => 2, 'name' => 'Mouse', 'price' => 25.00, 'stock' => 5, 'discount' => 0, 'visibility' => 1],
-        ['id' => 3, 'name' => 'Keyboard', 'price' => 45.00, 'stock' => 0, 'discount' => 15, 'visibility' => 0],
-    ];
-}
-
-// Initialize orders if not exists
-if (!isset($_SESSION['orders'])) {
-    $_SESSION['orders'] = [
-        ["id" => 101, "customer" => "Rahim", "product_id" => 1, "product" => "Laptop", "quantity" => 1, "total_price" => 899.10, "status" => "Pending", "delivery" => "Not Assigned", "refund" => "No", "date" => date('Y-m-d')],
-        ["id" => 102, "customer" => "Karim", "product_id" => 2, "product" => "Mouse", "quantity" => 2, "total_price" => 50.00, "status" => "Shipped", "delivery" => "On the way", "refund" => "No", "date" => date('Y-m-d')]
-    ];
-}
+// Check if user is logged in
+check_login();
 
 // Variables
 $statusMsg = "";
@@ -25,9 +12,9 @@ $errorMsg = "";
 
 // Handle Create New Order
 if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['create_order'])) {
-    $customer_name = trim($_POST['customer_name']);
-    $product_id = $_POST['product_id'];
-    $quantity = $_POST['quantity'];
+    $customer_name = sanitize_input($_POST['customer_name']);
+    $product_id = (int)$_POST['product_id'];
+    $quantity = (int)$_POST['quantity'];
     
     // Validation
     if (empty($customer_name)) {
@@ -38,15 +25,12 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['create_order'])) {
         $errorMsg = "Please enter a valid quantity!";
     } else {
         // Find the product
-        $selected_product = null;
-        foreach ($_SESSION['inventory'] as $product) {
-            if ($product['id'] == $product_id) {
-                $selected_product = $product;
-                break;
-            }
-        }
+        $product_query = "SELECT * FROM products WHERE id = $product_id";
+        $product_result = mysqli_query($conn, $product_query);
         
-        if ($selected_product) {
+        if (mysqli_num_rows($product_result) == 1) {
+            $selected_product = mysqli_fetch_assoc($product_result);
+            
             // Check stock availability
             if ($selected_product['stock'] < $quantity) {
                 $errorMsg = "Insufficient stock! Available: " . $selected_product['stock'];
@@ -56,34 +40,25 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['create_order'])) {
                 $discount_amount = ($price_per_item * $selected_product['discount']) / 100;
                 $final_price_per_item = $price_per_item - $discount_amount;
                 $total_price = $final_price_per_item * $quantity;
+                $product_name = $selected_product['name'];
+                $order_date = date('Y-m-d');
                 
                 // Create new order
-                $new_order_id = count($_SESSION['orders']) > 0 ? max(array_column($_SESSION['orders'], 'id')) + 1 : 101;
+                $insert_order = "INSERT INTO orders (customer_name, product_id, product_name, quantity, total_price, order_date) 
+                                VALUES ('$customer_name', $product_id, '$product_name', $quantity, $total_price, '$order_date')";
                 
-                $new_order = [
-                    'id' => $new_order_id,
-                    'customer' => htmlspecialchars($customer_name),
-                    'product_id' => $product_id,
-                    'product' => $selected_product['name'],
-                    'quantity' => $quantity,
-                    'total_price' => $total_price,
-                    'status' => 'Pending',
-                    'delivery' => 'Not Assigned',
-                    'refund' => 'No',
-                    'date' => date('Y-m-d')
-                ];
-                
-                $_SESSION['orders'][] = $new_order;
-                
-                // Update stock in inventory
-                foreach ($_SESSION['inventory'] as &$product) {
-                    if ($product['id'] == $product_id) {
-                        $product['stock'] -= $quantity;
-                        break;
-                    }
+                if (mysqli_query($conn, $insert_order)) {
+                    $new_order_id = mysqli_insert_id($conn);
+                    
+                    // Update stock in inventory
+                    $new_stock = $selected_product['stock'] - $quantity;
+                    $update_stock = "UPDATE products SET stock = $new_stock WHERE id = $product_id";
+                    mysqli_query($conn, $update_stock);
+                    
+                    $statusMsg = "Order created successfully! Order ID: #" . $new_order_id;
+                } else {
+                    $errorMsg = "Error creating order: " . mysqli_error($conn);
                 }
-                
-                $statusMsg = "Order created successfully! Order ID: #" . $new_order_id;
             }
         } else {
             $errorMsg = "Product not found!";
@@ -93,56 +68,66 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['create_order'])) {
 
 // Handle Update Order Status
 if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_status'])) {
-    $order_id = $_POST['order_id'];
-    $new_status = $_POST['status'];
+    $order_id = (int)$_POST['order_id'];
+    $new_status = sanitize_input($_POST['status']);
     
-    foreach ($_SESSION['orders'] as &$order) {
-        if ($order['id'] == $order_id) {
-            $order['status'] = htmlspecialchars($new_status);
-            $statusMsg = "Order #" . $order_id . " status updated to: " . $new_status;
-            break;
-        }
+    $update_query = "UPDATE orders SET status = '$new_status' WHERE id = $order_id";
+    
+    if (mysqli_query($conn, $update_query)) {
+        $statusMsg = "Order #" . $order_id . " status updated to: " . $new_status;
+    } else {
+        $errorMsg = "Error updating status: " . mysqli_error($conn);
     }
 }
 
 // Handle Update Delivery Info
 if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['update_delivery'])) {
-    $order_id = $_POST['order_id'];
-    $delivery_info = trim($_POST['delivery_info']);
+    $order_id = (int)$_POST['order_id'];
+    $delivery_info = sanitize_input($_POST['delivery_info']);
     
     if (!empty($delivery_info)) {
-        foreach ($_SESSION['orders'] as &$order) {
-            if ($order['id'] == $order_id) {
-                $order['delivery'] = htmlspecialchars($delivery_info);
-                $statusMsg = "Delivery information updated for Order #" . $order_id;
-                break;
-            }
+        $update_query = "UPDATE orders SET delivery_info = '$delivery_info' WHERE id = $order_id";
+        
+        if (mysqli_query($conn, $update_query)) {
+            $statusMsg = "Delivery information updated for Order #" . $order_id;
+        } else {
+            $errorMsg = "Error updating delivery info: " . mysqli_error($conn);
         }
     }
 }
 
 // Handle Refund/Return
 if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['refund'])) {
-    $order_id = $_POST['order_id'];
+    $order_id = (int)$_POST['order_id'];
     
-    foreach ($_SESSION['orders'] as &$order) {
-        if ($order['id'] == $order_id) {
-            $order['refund'] = "Yes";
-            $order['status'] = "Refunded";
-            
-            // Return stock to inventory
-            foreach ($_SESSION['inventory'] as &$product) {
-                if ($product['id'] == $order['product_id']) {
-                    $product['stock'] += $order['quantity'];
-                    break;
-                }
-            }
-            
-            $statusMsg = "Refund processed for Order #" . $order_id . ". Stock returned to inventory.";
-            break;
-        }
+    // Get order details
+    $order_query = "SELECT * FROM orders WHERE id = $order_id";
+    $order_result = mysqli_query($conn, $order_query);
+    
+    if (mysqli_num_rows($order_result) == 1) {
+        $order = mysqli_fetch_assoc($order_result);
+        
+        // Update order to refunded
+        $update_order = "UPDATE orders SET refund = 'Yes', status = 'Refunded' WHERE id = $order_id";
+        mysqli_query($conn, $update_order);
+        
+        // Return stock to inventory
+        $product_id = $order['product_id'];
+        $quantity = $order['quantity'];
+        $update_stock = "UPDATE products SET stock = stock + $quantity WHERE id = $product_id";
+        mysqli_query($conn, $update_stock);
+        
+        $statusMsg = "Refund processed for Order #" . $order_id . ". Stock returned to inventory.";
     }
 }
+
+// Fetch all products for dropdown
+$products_query = "SELECT * FROM products WHERE visibility = 1 AND stock > 0 ORDER BY name";
+$products_result = mysqli_query($conn, $products_query);
+
+// Fetch all orders
+$orders_query = "SELECT * FROM orders ORDER BY id DESC";
+$orders_result = mysqli_query($conn, $orders_query);
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -159,6 +144,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['refund'])) {
         .header p { font-size: 14px; color: #bdc3c7; margin-top: 5px; }
         .nav-links { float: right; }
         .nav-links a { color: white; text-decoration: none; padding: 10px 20px; margin-left: 10px; background-color: #007bff; border-radius: 5px; display: inline-block; }
+        .nav-links a.active { background-color: #0056b3; }
         .nav-links a.logout { background-color: #dc3545; }
         .nav-links a:hover { opacity: 0.8; }
         
@@ -208,11 +194,14 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['refund'])) {
 <div class="header">
     <div class="nav-links">
         <a href="inventory.php">Inventory</a>
-        <a href="orders.php">Orders</a>
-        <a href="login.php" class="logout">Logout</a>
+        <a href="orders.php" class="active">Orders</a>
+        <a href="customers.php">Customers</a>
+        <a href="categories.php">Categories</a>
+        <a href="analytics.php">Analytics</a>
+        <a href="logout.php" class="logout">Logout</a>
     </div>
     <h1>Order & Fulfillment Management</h1>
-    <p>Welcome, Admin</p>
+    <p>Welcome, <?php echo isset($_SESSION['full_name']) ? htmlspecialchars($_SESSION['full_name']) : 'Admin'; ?></p>
 </div>
 
 <div class="container">
@@ -238,18 +227,19 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['refund'])) {
                     <label>Select Product *</label>
                     <select name="product_id" required>
                         <option value="">-- Select Product --</option>
-                        <?php foreach ($_SESSION['inventory'] as $product): ?>
-                            <?php if ($product['visibility'] == 1 && $product['stock'] > 0): ?>
-                                <option value="<?php echo $product['id']; ?>">
-                                    <?php echo htmlspecialchars($product['name']); ?> 
-                                    - $<?php echo number_format($product['price'], 2); ?> 
-                                    (Stock: <?php echo $product['stock']; ?>) 
-                                    <?php if ($product['discount'] > 0): ?>
-                                        [<?php echo $product['discount']; ?>% OFF]
-                                    <?php endif; ?>
-                                </option>
-                            <?php endif; ?>
-                        <?php endforeach; ?>
+                        <?php 
+                        mysqli_data_seek($products_result, 0);
+                        while ($product = mysqli_fetch_assoc($products_result)): 
+                        ?>
+                            <option value="<?php echo $product['id']; ?>">
+                                <?php echo htmlspecialchars($product['name']); ?> 
+                                - $<?php echo number_format($product['price'], 2); ?> 
+                                (Stock: <?php echo $product['stock']; ?>) 
+                                <?php if ($product['discount'] > 0): ?>
+                                    [<?php echo $product['discount']; ?>% OFF]
+                                <?php endif; ?>
+                            </option>
+                        <?php endwhile; ?>
                     </select>
                 </div>
                 <div class="form-group">
@@ -279,12 +269,12 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['refund'])) {
                 </tr>
             </thead>
             <tbody>
-                <?php if (!empty($_SESSION['orders'])): ?>
-                    <?php foreach ($_SESSION['orders'] as $order): ?>
+                <?php if (mysqli_num_rows($orders_result) > 0): ?>
+                    <?php while ($order = mysqli_fetch_assoc($orders_result)): ?>
                     <tr>
                         <td><strong>#<?php echo $order["id"]; ?></strong></td>
-                        <td><?php echo htmlspecialchars($order["customer"]); ?></td>
-                        <td><?php echo htmlspecialchars($order["product"]); ?></td>
+                        <td><?php echo htmlspecialchars($order["customer_name"]); ?></td>
+                        <td><?php echo htmlspecialchars($order["product_name"]); ?></td>
                         <td><?php echo $order["quantity"]; ?></td>
                         <td>$<?php echo number_format($order["total_price"], 2); ?></td>
                         
@@ -312,7 +302,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['refund'])) {
                         
                         <!-- Delivery Info -->
                         <td>
-                            <div><?php echo htmlspecialchars($order["delivery"]); ?></div>
+                            <div><?php echo htmlspecialchars($order["delivery_info"]); ?></div>
                             <form method="post" style="margin-top: 5px;">
                                 <input type="hidden" name="order_id" value="<?php echo $order['id']; ?>">
                                 <input type="text" name="delivery_info" placeholder="Delivery status" class="inline">
@@ -332,7 +322,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['refund'])) {
                             <?php endif; ?>
                         </td>
                     </tr>
-                    <?php endforeach; ?>
+                    <?php endwhile; ?>
                 <?php else: ?>
                     <tr><td colspan="8" style="text-align: center;">No orders yet</td></tr>
                 <?php endif; ?>
