@@ -1,57 +1,95 @@
 <?php
+// ============================================================
+// LogPage.php (Admin Login) - SECURED:
+// prepared statements, brute force protection, CSRF
+// ============================================================
 session_start();
 require_once 'config.php';
 
-if(isset($_SESSION['admin_logged_in'])&&$_SESSION['admin_logged_in']===true){
+if (isset($_SESSION['admin_logged_in']) && $_SESSION['admin_logged_in'] === true) {
     header("Location: inventory.php"); exit();
 }
 
-$admin_id=$username=$password=$full_name=$email=$confirm_password="";
-$errors=[]; $success="";
-$active_tab=$_GET['tab']??'login';
+// Session timeout message
+$timeout_msg = isset($_GET['timeout']) ? 'Session expired. Please login again.' : '';
 
-if($_SERVER["REQUEST_METHOD"]=="POST"){
-    $form=$_POST["form_type"];
-    $active_tab=$form;
-    $admin_id=sanitize_input($_POST["admin_id"]??"");
-    $username=sanitize_input($_POST["username"]??"");
-    $password=$_POST["password"]??"";
+$admin_id = $username = $password = $full_name = $email = $confirm_password = "";
+$errors = []; $success = "";
+$active_tab = $_GET['tab'] ?? 'login';
+$ip = $_SERVER['REMOTE_ADDR'];
 
-    if(empty($admin_id)) $errors[]="Admin ID required.";
-    if(empty($username)) $errors[]="Username required.";
-    if(empty($password)) $errors[]="Password required.";
-
-    if($form=="register"){
-        $full_name=sanitize_input($_POST["full_name"]??"");
-        $email=sanitize_input($_POST["email"]??"");
-        $confirm_password=$_POST["confirm_password"]??"";
-        if(empty($full_name)) $errors[]="Full name required.";
-        if(empty($email)||!filter_var($email,FILTER_VALIDATE_EMAIL)) $errors[]="Valid email required.";
-        if(strlen($password)<6) $errors[]="Password min 6 chars.";
-        if($password!==$confirm_password) $errors[]="Passwords don't match.";
-        if(empty($errors)){
-            $chk=mysqli_query($conn,"SELECT id FROM admins WHERE admin_id='$admin_id' OR username='$username' OR email='$email'");
-            if(mysqli_num_rows($chk)>0) $errors[]="Admin ID, username or email already exists.";
-            else {
-                $hp=password_hash($password,PASSWORD_DEFAULT);
-                $q="INSERT INTO admins (admin_id,username,full_name,email,password) VALUES ('$admin_id','$username','$full_name','$email','$hp')";
-                if(mysqli_query($conn,$q)){ $success="Registered! You can now login."; $active_tab='login'; }
-                else $errors[]="Error: ".mysqli_error($conn);
-            }
-        }
+if ($_SERVER["REQUEST_METHOD"] == "POST") {
+    // CSRF check
+    if (!isset($_SESSION['admin_csrf']) || !hash_equals($_SESSION['admin_csrf'], $_POST['csrf_token'] ?? '')) {
+        $errors[] = "Invalid request. Please refresh and try again.";
     } else {
-        if(empty($errors)){
-            $r=mysqli_query($conn,"SELECT * FROM admins WHERE admin_id='$admin_id' AND username='$username'");
-            if(mysqli_num_rows($r)==1){
-                $admin=mysqli_fetch_assoc($r);
-                if(password_verify($password,$admin['password'])){
-                    $_SESSION['admin_logged_in']=true;
-                    $_SESSION['admin_id']=$admin['admin_id'];
-                    $_SESSION['username']=$admin['username'];
-                    $_SESSION['full_name']=$admin['full_name'];
-                    header("Location: inventory.php"); exit();
-                } else $errors[]="Invalid password!";
-            } else $errors[]="Invalid Admin ID or Username!";
+        $form     = $_POST["form_type"] ?? 'login';
+        $active_tab = $form;
+        $admin_id = sanitize_input($_POST["admin_id"] ?? "");
+        $username = sanitize_input($_POST["username"] ?? "");
+        $password = $_POST["password"] ?? "";
+
+        if (empty($admin_id)) $errors[] = "Admin ID required.";
+        if (empty($username)) $errors[] = "Username required.";
+        if (empty($password)) $errors[] = "Password required.";
+
+        if ($form == "register") {
+            $full_name        = sanitize_input($_POST["full_name"] ?? "");
+            $email            = trim($_POST["email"] ?? "");
+            $confirm_password = $_POST["confirm_password"] ?? "";
+
+            if (empty($full_name))                              $errors[] = "Full name required.";
+            if (empty($email) || !filter_var($email, FILTER_VALIDATE_EMAIL)) $errors[] = "Valid email required.";
+            if (strlen($password) < 8)                          $errors[] = "Password min 8 characters.";
+            if (!preg_match('/[A-Z]/', $password))              $errors[] = "Password needs an uppercase letter.";
+            if (!preg_match('/[0-9]/', $password))              $errors[] = "Password needs a number.";
+            if ($password !== $confirm_password)                $errors[] = "Passwords don't match.";
+
+            if (empty($errors)) {
+                $chk = $conn->prepare("SELECT id FROM admins WHERE admin_id = ? OR username = ? OR email = ?");
+                $chk->bind_param('sss', $admin_id, $username, $email);
+                $chk->execute();
+                $chk->store_result();
+                if ($chk->num_rows > 0) {
+                    $errors[] = "Admin ID, username, or email already exists.";
+                } else {
+                    $hp = password_hash($password, PASSWORD_BCRYPT, ['cost' => 12]);
+                    $ins = $conn->prepare("INSERT INTO admins (admin_id, username, full_name, email, password, created_at) VALUES (?, ?, ?, ?, ?, NOW())");
+                    $ins->bind_param('sssss', $admin_id, $username, $full_name, $email, $hp);
+                    if ($ins->execute()) {
+                        $success = "Registered successfully! You can now login.";
+                        $active_tab = 'login';
+                    } else {
+                        $errors[] = "Registration failed. Try again.";
+                    }
+                }
+            }
+        } else {
+            // Login - rate limit
+            if (!check_rate_limit('admin_login_' . $ip, 5, 300)) {
+                $errors[] = "Too many failed attempts. Please wait 5 minutes.";
+            } elseif (empty($errors)) {
+                $r = $conn->prepare("SELECT * FROM admins WHERE admin_id = ? AND username = ? LIMIT 1");
+                $r->bind_param('ss', $admin_id, $username);
+                $r->execute();
+                $result = $r->get_result();
+                if ($result->num_rows === 1) {
+                    $admin = $result->fetch_assoc();
+                    if (password_verify($password, $admin['password'])) {
+                        session_regenerate_id(true);
+                        $_SESSION['admin_logged_in'] = true;
+                        $_SESSION['admin_id']        = $admin['admin_id'];
+                        $_SESSION['username']        = $admin['username'];
+                        $_SESSION['full_name']       = $admin['full_name'];
+                        $_SESSION['admin_last_active'] = time();
+                        header("Location: inventory.php"); exit();
+                    } else {
+                        $errors[] = "Invalid password!";
+                    }
+                } else {
+                    $errors[] = "Invalid Admin ID or Username!";
+                }
+            }
         }
     }
 }
@@ -70,7 +108,7 @@ body{font-family:'Plus Jakarta Sans',sans-serif;min-height:100vh;display:flex;ba
 .bg-art span:nth-child(2){width:500px;height:500px;background:#8b5cf6;bottom:-150px;right:-150px;}
 .bg-art span:nth-child(3){width:300px;height:300px;background:#3b82f6;top:50%;left:50%;transform:translate(-50%,-50%);}
 .login-wrap{position:relative;z-index:1;display:flex;width:100%;min-height:100vh;}
-.login-left{flex:1;display:flex;flex-direction:column;justify-content:center;padding:60px;color:white;display:none;}
+.login-left{flex:1;display:none;flex-direction:column;justify-content:center;padding:60px;color:white;}
 @media(min-width:900px){.login-left{display:flex;}}
 .login-left .brand{font-size:32px;font-weight:800;margin-bottom:8px;}
 .login-left .tagline{font-size:16px;opacity:0.7;margin-bottom:48px;}
@@ -98,6 +136,7 @@ body{font-family:'Plus Jakarta Sans',sans-serif;min-height:100vh;display:flex;ba
 .errors{background:#fee2e2;color:#991b1b;border-radius:10px;padding:12px 16px;margin-bottom:16px;font-size:13px;}
 .errors li{margin-left:16px;}
 .success-msg{background:#d1fae5;color:#065f46;border-radius:10px;padding:12px 16px;margin-bottom:16px;font-size:13px;}
+.warn-msg{background:#fef3c7;color:#92400e;border-radius:10px;padding:12px 16px;margin-bottom:16px;font-size:13px;}
 </style>
 </head>
 <body>
@@ -122,11 +161,13 @@ body{font-family:'Plus Jakarta Sans',sans-serif;min-height:100vh;display:flex;ba
                 <a href="?tab=register" class="tab-link <?php echo $active_tab=='register'?'active':'';?>">Register</a>
             </div>
 
-            <?php if(!empty($errors)): ?><div class="errors"><ul><?php foreach($errors as $e): ?><li><?php echo $e;?></li><?php endforeach;?></ul></div><?php endif;?>
-            <?php if(!empty($success)): ?><div class="success-msg">✅ <?php echo $success;?></div><?php endif;?>
+            <?php if ($timeout_msg): ?><div class="warn-msg">⚠️ <?php echo $timeout_msg; ?></div><?php endif; ?>
+            <?php if (!empty($errors)): ?><div class="errors"><ul><?php foreach($errors as $e): ?><li><?php echo htmlspecialchars($e);?></li><?php endforeach;?></ul></div><?php endif;?>
+            <?php if (!empty($success)): ?><div class="success-msg">✅ <?php echo htmlspecialchars($success);?></div><?php endif;?>
 
-            <form method="POST">
+            <form method="POST" autocomplete="off">
                 <input type="hidden" name="form_type" value="<?php echo $active_tab;?>">
+                <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['admin_csrf'];?>">
                 <div class="fg"><label>Admin ID</label><input type="text" name="admin_id" class="inp" placeholder="ADMIN001" value="<?php echo htmlspecialchars($admin_id);?>" required></div>
                 <?php if($active_tab=='register'): ?>
                 <div class="fg"><label>Full Name</label><input type="text" name="full_name" class="inp" placeholder="Your full name" value="<?php echo htmlspecialchars($full_name);?>"></div>

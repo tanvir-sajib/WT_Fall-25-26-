@@ -1,38 +1,66 @@
 <?php
-// config.php - Database Configuration File
+// ============================================================
+// Admin config.php - SECURED
+// ============================================================
 
-// Database credentials
-define('DB_HOST', 'localhost');     // Change if your host is different
-define('DB_USER', 'root');          // Change to your database username
-define('DB_PASS', '');              // Change to your database password
-define('DB_NAME', 'ecommerce'); // Database name
+define('DEV_MODE', true);
+define('DB_HOST', 'localhost');
+define('DB_USER', 'root');
+define('DB_PASS', '');
+define('DB_NAME', 'ecommerce');
 
-// Create connection
-$conn = mysqli_connect(DB_HOST, DB_USER, DB_PASS, DB_NAME);
-
-// Check connection
-if (!$conn) {
-    die("Connection failed: " . mysqli_connect_error());
+if (DEV_MODE) {
+    ini_set('display_errors', 1);
+    error_reporting(E_ALL);
+} else {
+    ini_set('display_errors', 0);
+    error_reporting(0);
 }
 
-// Set charset to utf8mb4 for proper character encoding
+$conn = mysqli_connect(DB_HOST, DB_USER, DB_PASS, DB_NAME);
+if (!$conn) {
+    die(DEV_MODE ? "Connection failed: " . mysqli_connect_error() : "Service unavailable.");
+}
 mysqli_set_charset($conn, "utf8mb4");
 
-// Function to sanitize input
-function sanitize_input($data) {
-    global $conn;
-    $data = trim($data);
-    $data = stripslashes($data);
-    $data = htmlspecialchars($data);
-    $data = mysqli_real_escape_string($conn, $data);
-    return $data;
+// Hardened session
+if (session_status() === PHP_SESSION_NONE) {
+    session_set_cookie_params([
+        'lifetime' => 3600,
+        'path'     => '/',
+        'secure'   => !DEV_MODE,
+        'httponly' => true,
+        'samesite' => 'Strict',
+    ]);
+    session_start();
 }
 
-// Function to check if user is logged in
+// CSRF token for admin
+if (empty($_SESSION['admin_csrf'])) {
+    $_SESSION['admin_csrf'] = bin2hex(random_bytes(32));
+}
+
+function verify_admin_csrf($token) {
+    if (!isset($_SESSION['admin_csrf']) || !hash_equals($_SESSION['admin_csrf'], $token)) {
+        http_response_code(403);
+        die("Invalid request.");
+    }
+}
+
+function sanitize_input($data) {
+    return htmlspecialchars(strip_tags(trim($data)), ENT_QUOTES, 'UTF-8');
+}
+
 function check_login() {
     if (!isset($_SESSION['admin_logged_in']) || $_SESSION['admin_logged_in'] !== true) {
         header("Location: LogPage.php");
         exit();
     }
+    // Auto-logout after 2 hours of inactivity
+    if (isset($_SESSION['admin_last_active']) && (time() - $_SESSION['admin_last_active']) > 7200) {
+        session_destroy();
+        header("Location: LogPage.php?timeout=1");
+        exit();
+    }
+    $_SESSION['admin_last_active'] = time();
 }
-?>
